@@ -2,12 +2,12 @@
 -- PostgreSQL database dump
 --
 
-\restrict VUVBCdVTjV6VM82qejf3c9Gly3rb12YWGh7Bh1Dwm83dgYTFPm2Nv8VTPhfQLSb
+\restrict vlYMY6BNac75WoGmRwUllDmJXmNcJhkPMljAI3bnxhjMGICkYetOjWx5XshVDAP
 
 -- Dumped from database version 18.1
 -- Dumped by pg_dump version 18.1
 
--- Started on 2026-05-06 10:40:03
+-- Started on 2026-05-10 22:09:31
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -21,12 +21,161 @@ SET xmloption = content;
 SET client_min_messages = warning;
 SET row_security = off;
 
+--
+-- TOC entry 251 (class 1255 OID 25396)
+-- Name: f_firmastool(character varying, timestamp with time zone, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.f_firmastool(p_lennufirma character varying, p_algus timestamp with time zone, p_lopp timestamp with time zone) RETURNS TABLE(id integer, isikukood character varying, eesnimi character varying, perenimi character varying, "sünniaeg" date, rahvus character varying, amet character varying, palk numeric)
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+	return query select distinct m.id, m.isikukood, m.eesnimi, m.perenimi, m.sünniaeg, m.rahvus, m.amet, m.palk
+    from "LENNUFIRMAD" firmad
+	left join "LENNUKID" lennukid on firmad.id = lennukid.lennufirma
+    left join "LENNUD" lennud on lennud.lennuk = lennukid.id
+    left join "LENNUD_MEESKONNALIIKMED" lm on lennud.id = lm.lend
+    left join "MEESKONNALIIKMED" m on lm.meeskonnaliige = m.id
+	where firmad.nimi = p_lennufirma and lennud.algusaeg >= p_algus and lennud.lõppaeg <= p_lopp;
+    
+END;
+$$;
+
+
+--
+-- TOC entry 253 (class 1255 OID 25410)
+-- Name: f_lennulisamine(integer, integer, timestamp with time zone, timestamp with time zone, integer); Type: PROCEDURE; Schema: public; Owner: -
+--
+
+CREATE PROCEDURE public.f_lennulisamine(IN p_algus integer, IN p_lopp integer, IN p_algusaeg timestamp with time zone, IN p_loppaeg timestamp with time zone, IN p_lennuk integer)
+    LANGUAGE plpgsql
+    AS $$
+Begin
+	if exists (select 1 from "LENNUD" lennud
+		where lennud.lennuk = p_lennuk and (p_algusaeg >= lennud.algusaeg and p_algusaeg <= lennud.lõppaeg
+         or p_loppaeg >= lennud.algusaeg and p_loppaeg <= lennud.lõppaeg))
+    then raise exception 'Sellel ajal teenindab lennuk teist lendu!';
+	else 
+      insert into "LENNUD" (algus_lennujaam, lõpp_lennujaam, algusaeg, lõppaeg, lennuk) values (p_algus, p_lopp, p_algusaeg, p_loppaeg, p_lennuk);
+      raise notice 'Lend on lisatud!';
+	end if;
+End;
+$$;
+
+
+--
+-- TOC entry 252 (class 1255 OID 25401)
+-- Name: f_saatjagareisijad(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.f_saatjagareisijad(p_lennuid integer) RETURNS TABLE(reisija text, reisijaid integer, saatja text, saatjaid integer)
+    LANGUAGE plpgsql
+    AS $$
+Begin
+  return query select r1.eesnimi || ' ' || r1.perenimi, r1.id, r2.eesnimi || ' ' || r2.perenimi, r2.id
+  from "PILETID" piletid
+  join "REISIJAD" r1 on piletid.omanik = r1.id
+  join "REISIJAD" r2 on piletid.saatja = r2.id
+  where piletid.lend = p_lennuID and piletid.saatja is not null;
+End;
+$$;
+
+
+--
+-- TOC entry 238 (class 1255 OID 25387)
+-- Name: fn_reisija_lennud(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_reisija_lennud(p_reisija_id integer) RETURNS TABLE(pileti_id integer, reisija_nimi text, algus_lennujaam character varying, lopp_lennujaam character varying, algusaeg timestamp with time zone, lennufirma character varying, "pileti_tüüp" character varying, istekoht integer, hind integer)
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        p.id,
+        (r.eesnimi || ' ' || r.perenimi)::TEXT,
+        lj1.nimi,
+        lj2.nimi,
+        l.algusaeg,
+        lf.nimi,
+        p."tüüp",
+        p.istekoht,
+        p.hind
+    FROM public."PILETID" p
+    JOIN public."REISIJAD" r ON p.omanik = r.id
+    JOIN public."LENNUD" l ON p.lend = l.id
+    JOIN public."LENNUJAAMAD" lj1 ON l.algus_lennujaam = lj1.id
+    JOIN public."LENNUJAAMAD" lj2 ON l."lõpp_lennujaam" = lj2.id
+    JOIN public."LENNUKID" lk ON l.lennuk = lk.id
+    JOIN public."LENNUFIRMAD" lf ON lk.lennufirma = lf.id
+    WHERE p.omanik = p_reisija_id
+    ORDER BY l.algusaeg;
+END;
+$$;
+
+
+--
+-- TOC entry 250 (class 1255 OID 25388)
+-- Name: pr_müü_pilet(integer, integer, integer, character varying, integer, boolean); Type: PROCEDURE; Schema: public; Owner: -
+--
+
+CREATE PROCEDURE public."pr_müü_pilet"(IN p_lend_id integer, IN p_reisija_id integer, IN p_hind integer, IN "p_tüüp" character varying, IN p_istekoht integer, IN "p_käsipagas" boolean)
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_mahutavus INTEGER;
+    v_hõivatud BOOLEAN;
+BEGIN
+    -- Kontroll 1: lend olemas?
+    IF NOT EXISTS (SELECT 1 FROM public."LENNUD" WHERE id = p_lend_id) THEN
+        RAISE EXCEPTION 'Lendu ID-ga % ei eksisteeri', p_lend_id;
+    END IF;
+
+    -- Kontroll 2: reisija olemas?
+    IF NOT EXISTS (SELECT 1 FROM public."REISIJAD" WHERE id = p_reisija_id) THEN
+        RAISE EXCEPTION 'Reisijat ID-ga % ei eksisteeri', p_reisija_id;
+    END IF;
+
+    -- Kontroll 3: istekoht juba müüdud?
+    SELECT EXISTS(
+        SELECT 1 FROM public."PILETID" 
+        WHERE lend = p_lend_id AND istekoht = p_istekoht
+    ) INTO v_hõivatud;
+    
+    IF v_hõivatud THEN
+        RAISE EXCEPTION 'Istekoht % lennul % on juba müüdud', p_istekoht, p_lend_id;
+    END IF;
+
+    -- Kontroll 4: istekoha number ei ületa lennuki mahutavust
+    SELECT lm.mahutavus INTO v_mahutavus
+    FROM public."LENNUD" l
+    JOIN public."LENNUKID" lk ON l.lennuk = lk.id
+    JOIN public."LENNUKIMUDELID" lm ON lk.mudel = lm.id
+    WHERE l.id = p_lend_id;
+
+    IF p_istekoht > v_mahutavus THEN
+        RAISE EXCEPTION 'Istekoht % ületab lennuki mahutavuse (%)', 
+                        p_istekoht, v_mahutavus;
+    END IF;
+
+    -- Kõik korras — sisestame pileti
+    INSERT INTO public."PILETID" 
+        (lend, omanik, hind, "tüüp", istekoht, "käsipagas", saatja)
+    VALUES 
+        (p_lend_id, p_reisija_id, p_hind, p_tüüp, p_istekoht, p_käsipagas, NULL);
+
+    RAISE NOTICE 'Pilet edukalt müüdud: lend %, reisija %, istekoht %', 
+                 p_lend_id, p_reisija_id, p_istekoht;
+END;
+$$;
+
+
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
 
 --
--- TOC entry 232 (class 1259 OID 25447)
+-- TOC entry 219 (class 1259 OID 25167)
 -- Name: LENNUD; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -43,7 +192,7 @@ CREATE TABLE public."LENNUD" (
 
 
 --
--- TOC entry 234 (class 1259 OID 25460)
+-- TOC entry 220 (class 1259 OID 25178)
 -- Name: LENNUD_MEESKONNALIIKMED; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -55,7 +204,7 @@ CREATE TABLE public."LENNUD_MEESKONNALIIKMED" (
 
 
 --
--- TOC entry 233 (class 1259 OID 25459)
+-- TOC entry 221 (class 1259 OID 25184)
 -- Name: LENNUD_MEESKONNALIIKMED_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -69,8 +218,8 @@ CREATE SEQUENCE public."LENNUD_MEESKONNALIIKMED_id_seq"
 
 
 --
--- TOC entry 5138 (class 0 OID 0)
--- Dependencies: 233
+-- TOC entry 5148 (class 0 OID 0)
+-- Dependencies: 221
 -- Name: LENNUD_MEESKONNALIIKMED_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
 --
 
@@ -78,7 +227,7 @@ ALTER SEQUENCE public."LENNUD_MEESKONNALIIKMED_id_seq" OWNED BY public."LENNUD_M
 
 
 --
--- TOC entry 231 (class 1259 OID 25446)
+-- TOC entry 222 (class 1259 OID 25185)
 -- Name: LENNUD_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -92,8 +241,8 @@ CREATE SEQUENCE public."LENNUD_id_seq"
 
 
 --
--- TOC entry 5139 (class 0 OID 0)
--- Dependencies: 231
+-- TOC entry 5149 (class 0 OID 0)
+-- Dependencies: 222
 -- Name: LENNUD_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
 --
 
@@ -101,7 +250,7 @@ ALTER SEQUENCE public."LENNUD_id_seq" OWNED BY public."LENNUD".id;
 
 
 --
--- TOC entry 226 (class 1259 OID 25403)
+-- TOC entry 223 (class 1259 OID 25186)
 -- Name: LENNUFIRMAD; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -116,7 +265,7 @@ CREATE TABLE public."LENNUFIRMAD" (
 
 
 --
--- TOC entry 225 (class 1259 OID 25402)
+-- TOC entry 224 (class 1259 OID 25197)
 -- Name: LENNUFIRMAD_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -130,8 +279,8 @@ CREATE SEQUENCE public."LENNUFIRMAD_id_seq"
 
 
 --
--- TOC entry 5140 (class 0 OID 0)
--- Dependencies: 225
+-- TOC entry 5150 (class 0 OID 0)
+-- Dependencies: 224
 -- Name: LENNUFIRMAD_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
 --
 
@@ -139,7 +288,7 @@ ALTER SEQUENCE public."LENNUFIRMAD_id_seq" OWNED BY public."LENNUFIRMAD".id;
 
 
 --
--- TOC entry 228 (class 1259 OID 25419)
+-- TOC entry 225 (class 1259 OID 25198)
 -- Name: LENNUJAAMAD; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -160,7 +309,7 @@ CREATE TABLE public."LENNUJAAMAD" (
 
 
 --
--- TOC entry 227 (class 1259 OID 25418)
+-- TOC entry 226 (class 1259 OID 25213)
 -- Name: LENNUJAAMAD_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -174,8 +323,8 @@ CREATE SEQUENCE public."LENNUJAAMAD_id_seq"
 
 
 --
--- TOC entry 5141 (class 0 OID 0)
--- Dependencies: 227
+-- TOC entry 5151 (class 0 OID 0)
+-- Dependencies: 226
 -- Name: LENNUJAAMAD_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
 --
 
@@ -183,7 +332,7 @@ ALTER SEQUENCE public."LENNUJAAMAD_id_seq" OWNED BY public."LENNUJAAMAD".id;
 
 
 --
--- TOC entry 220 (class 1259 OID 25355)
+-- TOC entry 227 (class 1259 OID 25214)
 -- Name: LENNUKID; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -196,7 +345,7 @@ CREATE TABLE public."LENNUKID" (
 
 
 --
--- TOC entry 219 (class 1259 OID 25354)
+-- TOC entry 228 (class 1259 OID 25221)
 -- Name: LENNUKID_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -210,8 +359,8 @@ CREATE SEQUENCE public."LENNUKID_id_seq"
 
 
 --
--- TOC entry 5142 (class 0 OID 0)
--- Dependencies: 219
+-- TOC entry 5152 (class 0 OID 0)
+-- Dependencies: 228
 -- Name: LENNUKID_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
 --
 
@@ -219,7 +368,7 @@ ALTER SEQUENCE public."LENNUKID_id_seq" OWNED BY public."LENNUKID".id;
 
 
 --
--- TOC entry 222 (class 1259 OID 25368)
+-- TOC entry 229 (class 1259 OID 25222)
 -- Name: LENNUKIMUDELID; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -240,7 +389,7 @@ CREATE TABLE public."LENNUKIMUDELID" (
 
 
 --
--- TOC entry 221 (class 1259 OID 25367)
+-- TOC entry 230 (class 1259 OID 25239)
 -- Name: LENNUKIMUDELID_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -254,8 +403,8 @@ CREATE SEQUENCE public."LENNUKIMUDELID_id_seq"
 
 
 --
--- TOC entry 5143 (class 0 OID 0)
--- Dependencies: 221
+-- TOC entry 5153 (class 0 OID 0)
+-- Dependencies: 230
 -- Name: LENNUKIMUDELID_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
 --
 
@@ -263,7 +412,7 @@ ALTER SEQUENCE public."LENNUKIMUDELID_id_seq" OWNED BY public."LENNUKIMUDELID".i
 
 
 --
--- TOC entry 236 (class 1259 OID 25470)
+-- TOC entry 231 (class 1259 OID 25240)
 -- Name: MEESKONNALIIKMED; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -281,7 +430,7 @@ CREATE TABLE public."MEESKONNALIIKMED" (
 
 
 --
--- TOC entry 235 (class 1259 OID 25469)
+-- TOC entry 232 (class 1259 OID 25254)
 -- Name: MEESKONNALIIKMED_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -295,8 +444,8 @@ CREATE SEQUENCE public."MEESKONNALIIKMED_id_seq"
 
 
 --
--- TOC entry 5144 (class 0 OID 0)
--- Dependencies: 235
+-- TOC entry 5154 (class 0 OID 0)
+-- Dependencies: 232
 -- Name: MEESKONNALIIKMED_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
 --
 
@@ -304,7 +453,7 @@ ALTER SEQUENCE public."MEESKONNALIIKMED_id_seq" OWNED BY public."MEESKONNALIIKME
 
 
 --
--- TOC entry 230 (class 1259 OID 25433)
+-- TOC entry 233 (class 1259 OID 25255)
 -- Name: PILETID; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -323,7 +472,7 @@ CREATE TABLE public."PILETID" (
 
 
 --
--- TOC entry 229 (class 1259 OID 25432)
+-- TOC entry 234 (class 1259 OID 25267)
 -- Name: PILETID_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -337,8 +486,8 @@ CREATE SEQUENCE public."PILETID_id_seq"
 
 
 --
--- TOC entry 5145 (class 0 OID 0)
--- Dependencies: 229
+-- TOC entry 5155 (class 0 OID 0)
+-- Dependencies: 234
 -- Name: PILETID_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
 --
 
@@ -346,7 +495,7 @@ ALTER SEQUENCE public."PILETID_id_seq" OWNED BY public."PILETID".id;
 
 
 --
--- TOC entry 224 (class 1259 OID 25385)
+-- TOC entry 235 (class 1259 OID 25268)
 -- Name: REISIJAD; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -364,7 +513,7 @@ CREATE TABLE public."REISIJAD" (
 
 
 --
--- TOC entry 223 (class 1259 OID 25384)
+-- TOC entry 236 (class 1259 OID 25281)
 -- Name: REISIJAD_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -378,8 +527,8 @@ CREATE SEQUENCE public."REISIJAD_id_seq"
 
 
 --
--- TOC entry 5146 (class 0 OID 0)
--- Dependencies: 223
+-- TOC entry 5156 (class 0 OID 0)
+-- Dependencies: 236
 -- Name: REISIJAD_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
 --
 
@@ -387,7 +536,34 @@ ALTER SEQUENCE public."REISIJAD_id_seq" OWNED BY public."REISIJAD".id;
 
 
 --
--- TOC entry 4902 (class 2604 OID 25450)
+-- TOC entry 237 (class 1259 OID 25382)
+-- Name: vw_lendude_ulevaade; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.vw_lendude_ulevaade AS
+ SELECT l.id AS lennu_id,
+    lj1.nimi AS algus_lennujaam,
+    lj2.nimi AS lopp_lennujaam,
+    l.algusaeg,
+    l."lõppaeg",
+    lf.nimi AS lennufirma,
+    lm.mudeli_nimi AS lennuki_mudel,
+    lm.tootja,
+    count(p.id) AS piletite_arv,
+    COALESCE(sum(p.hind), (0)::bigint) AS kogutulu_eur
+   FROM ((((((public."LENNUD" l
+     JOIN public."LENNUJAAMAD" lj1 ON ((l.algus_lennujaam = lj1.id)))
+     JOIN public."LENNUJAAMAD" lj2 ON ((l."lõpp_lennujaam" = lj2.id)))
+     JOIN public."LENNUKID" lk ON ((l.lennuk = lk.id)))
+     JOIN public."LENNUFIRMAD" lf ON ((lk.lennufirma = lf.id)))
+     JOIN public."LENNUKIMUDELID" lm ON ((lk.mudel = lm.id)))
+     LEFT JOIN public."PILETID" p ON ((p.lend = l.id)))
+  GROUP BY l.id, lj1.nimi, lj2.nimi, l.algusaeg, l."lõppaeg", lf.nimi, lm.mudeli_nimi, lm.tootja
+  ORDER BY l.algusaeg;
+
+
+--
+-- TOC entry 4905 (class 2604 OID 25282)
 -- Name: LENNUD id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -395,7 +571,7 @@ ALTER TABLE ONLY public."LENNUD" ALTER COLUMN id SET DEFAULT nextval('public."LE
 
 
 --
--- TOC entry 4903 (class 2604 OID 25463)
+-- TOC entry 4906 (class 2604 OID 25283)
 -- Name: LENNUD_MEESKONNALIIKMED id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -403,7 +579,7 @@ ALTER TABLE ONLY public."LENNUD_MEESKONNALIIKMED" ALTER COLUMN id SET DEFAULT ne
 
 
 --
--- TOC entry 4899 (class 2604 OID 25406)
+-- TOC entry 4907 (class 2604 OID 25284)
 -- Name: LENNUFIRMAD id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -411,7 +587,7 @@ ALTER TABLE ONLY public."LENNUFIRMAD" ALTER COLUMN id SET DEFAULT nextval('publi
 
 
 --
--- TOC entry 4900 (class 2604 OID 25422)
+-- TOC entry 4908 (class 2604 OID 25285)
 -- Name: LENNUJAAMAD id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -419,7 +595,7 @@ ALTER TABLE ONLY public."LENNUJAAMAD" ALTER COLUMN id SET DEFAULT nextval('publi
 
 
 --
--- TOC entry 4896 (class 2604 OID 25358)
+-- TOC entry 4909 (class 2604 OID 25286)
 -- Name: LENNUKID id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -427,7 +603,7 @@ ALTER TABLE ONLY public."LENNUKID" ALTER COLUMN id SET DEFAULT nextval('public."
 
 
 --
--- TOC entry 4897 (class 2604 OID 25371)
+-- TOC entry 4910 (class 2604 OID 25287)
 -- Name: LENNUKIMUDELID id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -435,7 +611,7 @@ ALTER TABLE ONLY public."LENNUKIMUDELID" ALTER COLUMN id SET DEFAULT nextval('pu
 
 
 --
--- TOC entry 4904 (class 2604 OID 25473)
+-- TOC entry 4911 (class 2604 OID 25288)
 -- Name: MEESKONNALIIKMED id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -443,7 +619,7 @@ ALTER TABLE ONLY public."MEESKONNALIIKMED" ALTER COLUMN id SET DEFAULT nextval('
 
 
 --
--- TOC entry 4901 (class 2604 OID 25436)
+-- TOC entry 4912 (class 2604 OID 25289)
 -- Name: PILETID id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -451,7 +627,7 @@ ALTER TABLE ONLY public."PILETID" ALTER COLUMN id SET DEFAULT nextval('public."P
 
 
 --
--- TOC entry 4898 (class 2604 OID 25388)
+-- TOC entry 4913 (class 2604 OID 25290)
 -- Name: REISIJAD id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -459,8 +635,8 @@ ALTER TABLE ONLY public."REISIJAD" ALTER COLUMN id SET DEFAULT nextval('public."
 
 
 --
--- TOC entry 5128 (class 0 OID 25447)
--- Dependencies: 232
+-- TOC entry 5125 (class 0 OID 25167)
+-- Dependencies: 219
 -- Data for Name: LENNUD; Type: TABLE DATA; Schema: public; Owner: -
 --
 
@@ -474,11 +650,12 @@ INSERT INTO public."LENNUD" VALUES (7, 6, 7, '2026-06-04 16:00:00+03', '2026-06-
 INSERT INTO public."LENNUD" VALUES (8, 7, 8, '2026-06-04 19:30:00+03', '2026-06-04 22:45:00+03', 8);
 INSERT INTO public."LENNUD" VALUES (9, 8, 9, '2026-06-05 09:00:00+03', '2026-06-05 14:30:00+03', 9);
 INSERT INTO public."LENNUD" VALUES (10, 9, 10, '2026-06-05 16:15:00+03', '2026-06-05 18:45:00+03', 10);
+INSERT INTO public."LENNUD" VALUES (11, 10, 9, '2026-06-03 08:10:00+03', '2026-06-03 11:05:00+03', 6);
 
 
 --
--- TOC entry 5130 (class 0 OID 25460)
--- Dependencies: 234
+-- TOC entry 5126 (class 0 OID 25178)
+-- Dependencies: 220
 -- Data for Name: LENNUD_MEESKONNALIIKMED; Type: TABLE DATA; Schema: public; Owner: -
 --
 
@@ -505,8 +682,8 @@ INSERT INTO public."LENNUD_MEESKONNALIIKMED" VALUES (20, 10, 6);
 
 
 --
--- TOC entry 5122 (class 0 OID 25403)
--- Dependencies: 226
+-- TOC entry 5129 (class 0 OID 25186)
+-- Dependencies: 223
 -- Data for Name: LENNUFIRMAD; Type: TABLE DATA; Schema: public; Owner: -
 --
 
@@ -523,8 +700,8 @@ INSERT INTO public."LENNUFIRMAD" VALUES (10, 'Wizz Air', 'odavlennufirma', 'Unga
 
 
 --
--- TOC entry 5124 (class 0 OID 25419)
--- Dependencies: 228
+-- TOC entry 5131 (class 0 OID 25198)
+-- Dependencies: 225
 -- Data for Name: LENNUJAAMAD; Type: TABLE DATA; Schema: public; Owner: -
 --
 
@@ -541,8 +718,8 @@ INSERT INTO public."LENNUJAAMAD" VALUES (10, 'Rooma Fiumicino lennujaam', 12.250
 
 
 --
--- TOC entry 5116 (class 0 OID 25355)
--- Dependencies: 220
+-- TOC entry 5133 (class 0 OID 25214)
+-- Dependencies: 227
 -- Data for Name: LENNUKID; Type: TABLE DATA; Schema: public; Owner: -
 --
 
@@ -559,8 +736,8 @@ INSERT INTO public."LENNUKID" VALUES (10, 'HA-WZZ', 10, 1);
 
 
 --
--- TOC entry 5118 (class 0 OID 25368)
--- Dependencies: 222
+-- TOC entry 5135 (class 0 OID 25222)
+-- Dependencies: 229
 -- Data for Name: LENNUKIMUDELID; Type: TABLE DATA; Schema: public; Owner: -
 --
 
@@ -577,8 +754,8 @@ INSERT INTO public."LENNUKIMUDELID" VALUES (10, 'CRJ900', 'Bombardier', 90, 2950
 
 
 --
--- TOC entry 5132 (class 0 OID 25470)
--- Dependencies: 236
+-- TOC entry 5137 (class 0 OID 25240)
+-- Dependencies: 231
 -- Data for Name: MEESKONNALIIKMED; Type: TABLE DATA; Schema: public; Owner: -
 --
 
@@ -595,8 +772,8 @@ INSERT INTO public."MEESKONNALIIKMED" VALUES (10, '39701070101', 'Kristi', 'Roos
 
 
 --
--- TOC entry 5126 (class 0 OID 25433)
--- Dependencies: 230
+-- TOC entry 5139 (class 0 OID 25255)
+-- Dependencies: 233
 -- Data for Name: PILETID; Type: TABLE DATA; Schema: public; Owner: -
 --
 
@@ -610,11 +787,12 @@ INSERT INTO public."PILETID" VALUES (7, 7, 7, 210, 'äriklass', 5, true, NULL);
 INSERT INTO public."PILETID" VALUES (8, 8, 8, 260, 'turistiklass', 28, true, NULL);
 INSERT INTO public."PILETID" VALUES (9, 9, 9, 310, 'turistiklass', 31, true, NULL);
 INSERT INTO public."PILETID" VALUES (10, 10, 10, 150, 'turistiklass', 20, false, NULL);
+INSERT INTO public."PILETID" VALUES (11, 1, 2, 95, 'turistiklass', 14, true, 1);
 
 
 --
--- TOC entry 5120 (class 0 OID 25385)
--- Dependencies: 224
+-- TOC entry 5141 (class 0 OID 25268)
+-- Dependencies: 235
 -- Data for Name: REISIJAD; Type: TABLE DATA; Schema: public; Owner: -
 --
 
@@ -631,8 +809,8 @@ INSERT INTO public."REISIJAD" VALUES (10, '39910100110', 'Priit', 'Kalda', 'eest
 
 
 --
--- TOC entry 5147 (class 0 OID 0)
--- Dependencies: 233
+-- TOC entry 5157 (class 0 OID 0)
+-- Dependencies: 221
 -- Name: LENNUD_MEESKONNALIIKMED_id_seq; Type: SEQUENCE SET; Schema: public; Owner: -
 --
 
@@ -640,17 +818,17 @@ SELECT pg_catalog.setval('public."LENNUD_MEESKONNALIIKMED_id_seq"', 20, true);
 
 
 --
--- TOC entry 5148 (class 0 OID 0)
--- Dependencies: 231
+-- TOC entry 5158 (class 0 OID 0)
+-- Dependencies: 222
 -- Name: LENNUD_id_seq; Type: SEQUENCE SET; Schema: public; Owner: -
 --
 
-SELECT pg_catalog.setval('public."LENNUD_id_seq"', 10, true);
+SELECT pg_catalog.setval('public."LENNUD_id_seq"', 11, true);
 
 
 --
--- TOC entry 5149 (class 0 OID 0)
--- Dependencies: 225
+-- TOC entry 5159 (class 0 OID 0)
+-- Dependencies: 224
 -- Name: LENNUFIRMAD_id_seq; Type: SEQUENCE SET; Schema: public; Owner: -
 --
 
@@ -658,8 +836,8 @@ SELECT pg_catalog.setval('public."LENNUFIRMAD_id_seq"', 10, true);
 
 
 --
--- TOC entry 5150 (class 0 OID 0)
--- Dependencies: 227
+-- TOC entry 5160 (class 0 OID 0)
+-- Dependencies: 226
 -- Name: LENNUJAAMAD_id_seq; Type: SEQUENCE SET; Schema: public; Owner: -
 --
 
@@ -667,8 +845,8 @@ SELECT pg_catalog.setval('public."LENNUJAAMAD_id_seq"', 10, true);
 
 
 --
--- TOC entry 5151 (class 0 OID 0)
--- Dependencies: 219
+-- TOC entry 5161 (class 0 OID 0)
+-- Dependencies: 228
 -- Name: LENNUKID_id_seq; Type: SEQUENCE SET; Schema: public; Owner: -
 --
 
@@ -676,8 +854,8 @@ SELECT pg_catalog.setval('public."LENNUKID_id_seq"', 10, true);
 
 
 --
--- TOC entry 5152 (class 0 OID 0)
--- Dependencies: 221
+-- TOC entry 5162 (class 0 OID 0)
+-- Dependencies: 230
 -- Name: LENNUKIMUDELID_id_seq; Type: SEQUENCE SET; Schema: public; Owner: -
 --
 
@@ -685,8 +863,8 @@ SELECT pg_catalog.setval('public."LENNUKIMUDELID_id_seq"', 10, true);
 
 
 --
--- TOC entry 5153 (class 0 OID 0)
--- Dependencies: 235
+-- TOC entry 5163 (class 0 OID 0)
+-- Dependencies: 232
 -- Name: MEESKONNALIIKMED_id_seq; Type: SEQUENCE SET; Schema: public; Owner: -
 --
 
@@ -694,17 +872,17 @@ SELECT pg_catalog.setval('public."MEESKONNALIIKMED_id_seq"', 10, true);
 
 
 --
--- TOC entry 5154 (class 0 OID 0)
--- Dependencies: 229
+-- TOC entry 5164 (class 0 OID 0)
+-- Dependencies: 234
 -- Name: PILETID_id_seq; Type: SEQUENCE SET; Schema: public; Owner: -
 --
 
-SELECT pg_catalog.setval('public."PILETID_id_seq"', 10, true);
+SELECT pg_catalog.setval('public."PILETID_id_seq"', 11, true);
 
 
 --
--- TOC entry 5155 (class 0 OID 0)
--- Dependencies: 223
+-- TOC entry 5165 (class 0 OID 0)
+-- Dependencies: 236
 -- Name: REISIJAD_id_seq; Type: SEQUENCE SET; Schema: public; Owner: -
 --
 
@@ -712,7 +890,7 @@ SELECT pg_catalog.setval('public."REISIJAD_id_seq"', 10, true);
 
 
 --
--- TOC entry 4950 (class 2606 OID 25468)
+-- TOC entry 4935 (class 2606 OID 25292)
 -- Name: LENNUD_MEESKONNALIIKMED LENNUD_MEESKONNALIIKMED_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -721,7 +899,7 @@ ALTER TABLE ONLY public."LENNUD_MEESKONNALIIKMED"
 
 
 --
--- TOC entry 4946 (class 2606 OID 25458)
+-- TOC entry 4931 (class 2606 OID 25294)
 -- Name: LENNUD LENNUD_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -730,7 +908,7 @@ ALTER TABLE ONLY public."LENNUD"
 
 
 --
--- TOC entry 4934 (class 2606 OID 25417)
+-- TOC entry 4939 (class 2606 OID 25296)
 -- Name: LENNUFIRMAD LENNUFIRMAD_nimi_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -739,7 +917,7 @@ ALTER TABLE ONLY public."LENNUFIRMAD"
 
 
 --
--- TOC entry 4936 (class 2606 OID 25415)
+-- TOC entry 4941 (class 2606 OID 25298)
 -- Name: LENNUFIRMAD LENNUFIRMAD_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -748,7 +926,7 @@ ALTER TABLE ONLY public."LENNUFIRMAD"
 
 
 --
--- TOC entry 4938 (class 2606 OID 25431)
+-- TOC entry 4943 (class 2606 OID 25300)
 -- Name: LENNUJAAMAD LENNUJAAMAD_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -757,7 +935,7 @@ ALTER TABLE ONLY public."LENNUJAAMAD"
 
 
 --
--- TOC entry 4922 (class 2606 OID 25364)
+-- TOC entry 4947 (class 2606 OID 25302)
 -- Name: LENNUKID LENNUKID_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -766,7 +944,7 @@ ALTER TABLE ONLY public."LENNUKID"
 
 
 --
--- TOC entry 4924 (class 2606 OID 25366)
+-- TOC entry 4949 (class 2606 OID 25304)
 -- Name: LENNUKID LENNUKID_registri_number_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -775,7 +953,7 @@ ALTER TABLE ONLY public."LENNUKID"
 
 
 --
--- TOC entry 4926 (class 2606 OID 25383)
+-- TOC entry 4951 (class 2606 OID 25306)
 -- Name: LENNUKIMUDELID LENNUKIMUDELID_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -784,7 +962,7 @@ ALTER TABLE ONLY public."LENNUKIMUDELID"
 
 
 --
--- TOC entry 4954 (class 2606 OID 25487)
+-- TOC entry 4955 (class 2606 OID 25308)
 -- Name: MEESKONNALIIKMED MEESKONNALIIKMED_isikukood_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -793,7 +971,7 @@ ALTER TABLE ONLY public."MEESKONNALIIKMED"
 
 
 --
--- TOC entry 4956 (class 2606 OID 25485)
+-- TOC entry 4957 (class 2606 OID 25310)
 -- Name: MEESKONNALIIKMED MEESKONNALIIKMED_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -802,7 +980,7 @@ ALTER TABLE ONLY public."MEESKONNALIIKMED"
 
 
 --
--- TOC entry 4942 (class 2606 OID 25445)
+-- TOC entry 4959 (class 2606 OID 25312)
 -- Name: PILETID PILETID_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -811,7 +989,7 @@ ALTER TABLE ONLY public."PILETID"
 
 
 --
--- TOC entry 4930 (class 2606 OID 25401)
+-- TOC entry 4963 (class 2606 OID 25314)
 -- Name: REISIJAD REISIJAD_isikukood_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -820,7 +998,7 @@ ALTER TABLE ONLY public."REISIJAD"
 
 
 --
--- TOC entry 4932 (class 2606 OID 25399)
+-- TOC entry 4965 (class 2606 OID 25316)
 -- Name: REISIJAD REISIJAD_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -829,7 +1007,7 @@ ALTER TABLE ONLY public."REISIJAD"
 
 
 --
--- TOC entry 4940 (class 2606 OID 25552)
+-- TOC entry 4945 (class 2606 OID 25318)
 -- Name: LENNUJAAMAD unique_koordinaadid; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -838,7 +1016,7 @@ ALTER TABLE ONLY public."LENNUJAAMAD"
 
 
 --
--- TOC entry 4944 (class 2606 OID 25546)
+-- TOC entry 4961 (class 2606 OID 25320)
 -- Name: PILETID unique_lend_istekoht; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -847,7 +1025,7 @@ ALTER TABLE ONLY public."PILETID"
 
 
 --
--- TOC entry 4952 (class 2606 OID 25548)
+-- TOC entry 4937 (class 2606 OID 25322)
 -- Name: LENNUD_MEESKONNALIIKMED unique_lend_meeskonnaliige; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -856,7 +1034,7 @@ ALTER TABLE ONLY public."LENNUD_MEESKONNALIIKMED"
 
 
 --
--- TOC entry 4948 (class 2606 OID 25550)
+-- TOC entry 4933 (class 2606 OID 25324)
 -- Name: LENNUD unique_lennuk_algusaeg; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -865,7 +1043,7 @@ ALTER TABLE ONLY public."LENNUD"
 
 
 --
--- TOC entry 4928 (class 2606 OID 25544)
+-- TOC entry 4953 (class 2606 OID 25326)
 -- Name: LENNUKIMUDELID unique_mudel_tootja; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -874,7 +1052,7 @@ ALTER TABLE ONLY public."LENNUKIMUDELID"
 
 
 --
--- TOC entry 4966 (class 2606 OID 25533)
+-- TOC entry 4969 (class 2606 OID 25327)
 -- Name: LENNUD_MEESKONNALIIKMED LENNUD_MEESKONNALIIKMED_fk1; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -883,7 +1061,7 @@ ALTER TABLE ONLY public."LENNUD_MEESKONNALIIKMED"
 
 
 --
--- TOC entry 4967 (class 2606 OID 25538)
+-- TOC entry 4970 (class 2606 OID 25332)
 -- Name: LENNUD_MEESKONNALIIKMED LENNUD_MEESKONNALIIKMED_fk2; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -892,7 +1070,7 @@ ALTER TABLE ONLY public."LENNUD_MEESKONNALIIKMED"
 
 
 --
--- TOC entry 4963 (class 2606 OID 25518)
+-- TOC entry 4966 (class 2606 OID 25337)
 -- Name: LENNUD LENNUD_fk1; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -901,7 +1079,7 @@ ALTER TABLE ONLY public."LENNUD"
 
 
 --
--- TOC entry 4964 (class 2606 OID 25523)
+-- TOC entry 4967 (class 2606 OID 25342)
 -- Name: LENNUD LENNUD_fk2; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -910,7 +1088,7 @@ ALTER TABLE ONLY public."LENNUD"
 
 
 --
--- TOC entry 4965 (class 2606 OID 25528)
+-- TOC entry 4968 (class 2606 OID 25347)
 -- Name: LENNUD LENNUD_fk5; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -919,7 +1097,7 @@ ALTER TABLE ONLY public."LENNUD"
 
 
 --
--- TOC entry 4957 (class 2606 OID 25488)
+-- TOC entry 4971 (class 2606 OID 25352)
 -- Name: LENNUKID LENNUKID_fk2; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -928,7 +1106,7 @@ ALTER TABLE ONLY public."LENNUKID"
 
 
 --
--- TOC entry 4958 (class 2606 OID 25493)
+-- TOC entry 4972 (class 2606 OID 25357)
 -- Name: LENNUKID LENNUKID_fk3; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -937,7 +1115,7 @@ ALTER TABLE ONLY public."LENNUKID"
 
 
 --
--- TOC entry 4960 (class 2606 OID 25503)
+-- TOC entry 4973 (class 2606 OID 25362)
 -- Name: PILETID PILETID_fk1; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -946,7 +1124,7 @@ ALTER TABLE ONLY public."PILETID"
 
 
 --
--- TOC entry 4961 (class 2606 OID 25508)
+-- TOC entry 4974 (class 2606 OID 25367)
 -- Name: PILETID PILETID_fk2; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -955,7 +1133,7 @@ ALTER TABLE ONLY public."PILETID"
 
 
 --
--- TOC entry 4962 (class 2606 OID 25513)
+-- TOC entry 4975 (class 2606 OID 25372)
 -- Name: PILETID PILETID_fk7; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -964,7 +1142,7 @@ ALTER TABLE ONLY public."PILETID"
 
 
 --
--- TOC entry 4959 (class 2606 OID 25498)
+-- TOC entry 4976 (class 2606 OID 25377)
 -- Name: REISIJAD REISIJAD_fk7; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -972,11 +1150,11 @@ ALTER TABLE ONLY public."REISIJAD"
     ADD CONSTRAINT "REISIJAD_fk7" FOREIGN KEY (lemmik_lennufirma) REFERENCES public."LENNUFIRMAD"(id);
 
 
--- Completed on 2026-05-06 10:40:03
+-- Completed on 2026-05-10 22:09:32
 
 --
 -- PostgreSQL database dump complete
 --
 
-\unrestrict VUVBCdVTjV6VM82qejf3c9Gly3rb12YWGh7Bh1Dwm83dgYTFPm2Nv8VTPhfQLSb
+\unrestrict vlYMY6BNac75WoGmRwUllDmJXmNcJhkPMljAI3bnxhjMGICkYetOjWx5XshVDAP
 
